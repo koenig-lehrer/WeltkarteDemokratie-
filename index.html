@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a1822">
+  <title>Demokratien in der Welt</title>
+  <style>
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: #0a1822;
+      color: #f7fbfd;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    body {
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    main {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 22px 24px 16px;
+    }
+
+    header {
+      text-align: center;
+      margin: 0 0 6px;
+      z-index: 2;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 58px);
+      line-height: 1.05;
+      letter-spacing: -0.02em;
+    }
+
+    p {
+      margin: 8px 0 0;
+      color: #c9d8df;
+      font-size: clamp(16px, 1.7vw, 24px);
+    }
+
+    .globe-stage {
+      position: relative;
+      display: grid;
+      place-items: center;
+      flex: 1;
+      width: 100%;
+      min-height: 0;
+    }
+
+    canvas {
+      display: block;
+      max-width: 94vw;
+      max-height: calc(100vh - 125px);
+      filter: drop-shadow(0 18px 26px rgba(0, 0, 0, 0.36));
+    }
+
+    .status {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 24px;
+      font-size: clamp(18px, 2vw, 26px);
+      color: #eaf3f7;
+      pointer-events: none;
+    }
+
+    .status.hidden { display: none; }
+
+    @media (max-width: 640px) {
+      main { padding: 16px 10px 10px; }
+      h1 { font-size: 30px; }
+      p { font-size: 16px; }
+      canvas { max-height: calc(100vh - 105px); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Demokratien in der Welt</h1>
+      <p>Welche sechs Länder sind grün hervorgehoben?</p>
+    </header>
+
+    <section class="globe-stage" aria-label="Langsam rotierende Weltkugel">
+      <canvas id="globe" role="img" aria-label="Langsam rotierende Weltkugel mit sechs grün hervorgehobenen Ländern"></canvas>
+      <div id="status" class="status">Weltkarte wird geladen …</div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+  <script>
+    (() => {
+      'use strict';
+
+      const canvas = document.getElementById('globe');
+      const status = document.getElementById('status');
+      const ctx = canvas.getContext('2d');
+
+      // UN-M49-IDs: Deutschland, Frankreich, USA, Kanada, Japan, Australien.
+      const highlightedIds = new Set([276, 250, 840, 124, 392, 36]);
+
+      const DATA_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-50m.json';
+      const ROTATION_SPEED = 0.006; // Grad pro Millisekunde = ca. 1 Minute pro Umdrehung
+
+      let countries = [];
+      let borders = null;
+      let size = 700;
+      let longitude = -5;
+      let previousTime = performance.now();
+      let running = false;
+
+      const projection = d3.geoOrthographic()
+        .precision(0.3)
+        .clipAngle(90)
+        .rotate([longitude, -10, 0]);
+
+      const path = d3.geoPath(projection, ctx);
+
+      function resize() {
+        const availableW = Math.max(320, window.innerWidth * 0.94);
+        const availableH = Math.max(320, window.innerHeight - 115);
+        size = Math.floor(Math.min(900, availableW, availableH));
+
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.style.width = size + 'px';
+        canvas.style.height = size + 'px';
+        canvas.width = Math.floor(size * dpr);
+        canvas.height = Math.floor(size * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        projection
+          .translate([size / 2, size / 2])
+          .scale(size * 0.47);
+
+        if (countries.length) draw();
+      }
+
+      function drawGeometry(geometry, fill, stroke, lineWidth) {
+        ctx.beginPath();
+        path(geometry);
+        if (fill) {
+          ctx.fillStyle = fill;
+          ctx.fill();
+        }
+        if (stroke) {
+          ctx.strokeStyle = stroke;
+          ctx.lineWidth = lineWidth;
+          ctx.stroke();
+        }
+      }
+
+      // Für die grüne Hervorhebung nutzen wir bewusst nur die großen,
+      // im Unterricht gut erkennbaren Landmassen. Kleine Inseln und
+      // Überseegebiete werden nicht grün eingefärbt, damit keine
+      // zusätzlichen grünen Flecken auf der Kugel entstehen.
+      function highlightGeometry(country) {
+        const id = Number(country.id);
+        if (!highlightedIds.has(id)) return null;
+
+        if (country.geometry.type === 'Polygon') return country;
+        if (country.geometry.type !== 'MultiPolygon') return country;
+
+        let polygons = country.geometry.coordinates.map(coords => ({
+          type: 'Feature',
+          properties: country.properties || {},
+          geometry: { type: 'Polygon', coordinates: coords }
+        }));
+
+        // Frankreich: nur das europäische Staatsgebiet hervorheben
+        // (inkl. Korsika), keine Überseegebiete.
+        if (id === 250) {
+          polygons = polygons.filter(poly => {
+            const [lon, lat] = d3.geoCentroid(poly);
+            return lon >= -6.5 && lon <= 10.5 && lat >= 41 && lat <= 52.5;
+          });
+          return { type: 'FeatureCollection', features: polygons };
+        }
+
+        // Nach Flächengröße sortieren und nur die prägenden Landmassen behalten.
+        polygons.sort((a, b) => d3.geoArea(b) - d3.geoArea(a));
+        const keepCount = {
+          276: 1, // Deutschland
+          840: 2, // USA: Festland + Alaska
+          124: 1, // Kanada: große zusammenhängende Landmasse
+          392: 4, // Japan: vier Hauptinseln
+          36: 2   // Australien: Festland + Tasmanien
+        }[id] || 1;
+
+        return { type: 'FeatureCollection', features: polygons.slice(0, keepCount) };
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, size, size);
+
+        // Heller Ozean und klarer Kugelrand.
+        drawGeometry({ type: 'Sphere' }, '#d9edf7', '#8ba6b3', 1.8);
+
+        // Zuerst alle Länder neutral zeichnen.
+        for (const country of countries) {
+          drawGeometry(country, '#f8f7f1', null, 0);
+        }
+
+        // Danach nur die sechs gewünschten Demokratien grün hervorheben.
+        for (const country of countries) {
+          const highlighted = highlightGeometry(country);
+          if (highlighted) {
+            drawGeometry(highlighted, '#35a853', '#126a2e', 1.4);
+          }
+        }
+
+        // Alle Ländergrenzen deutlich über die Flächen legen.
+        if (borders) {
+          ctx.beginPath();
+          path(borders);
+          ctx.strokeStyle = '#52656e';
+          ctx.lineWidth = Math.max(0.65, size / 900);
+          ctx.stroke();
+        }
+
+        // Kugelrand noch einmal sauber nachziehen.
+        drawGeometry({ type: 'Sphere' }, null, '#75909c', 1.8);
+      }
+
+      function animate(now) {
+        if (!running) return;
+        const dt = Math.min(50, now - previousTime);
+        previousTime = now;
+        longitude = (longitude + dt * ROTATION_SPEED) % 360;
+        projection.rotate([longitude, -10, 0]);
+        draw();
+        requestAnimationFrame(animate);
+      }
+
+      async function start() {
+        resize();
+        try {
+          if (!window.d3 || !window.topojson) {
+            throw new Error('Kartenbibliothek konnte nicht geladen werden.');
+          }
+
+          const response = await fetch(DATA_URL, { cache: 'force-cache' });
+          if (!response.ok) throw new Error('Kartendaten konnten nicht geladen werden.');
+          const world = await response.json();
+
+          countries = topojson.feature(world, world.objects.countries).features;
+          borders = topojson.mesh(world, world.objects.countries, (a, b) => a !== b);
+
+          status.classList.add('hidden');
+          draw();
+          running = true;
+          previousTime = performance.now();
+          requestAnimationFrame(animate);
+        } catch (error) {
+          console.error(error);
+          status.textContent = 'Die Weltkarte konnte nicht geladen werden. Bitte die Internetverbindung prüfen und die Seite neu laden.';
+        }
+      }
+
+      window.addEventListener('resize', resize, { passive: true });
+      start();
+    })();
+  </script>
+</body>
+</html>
